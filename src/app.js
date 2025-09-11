@@ -24,6 +24,7 @@ const updateChat = db.prepare(`
 const selectUserByTg = db.prepare(`
   SELECT * FROM users WHERE tg_user_id = ?
 `);
+
 const insertAlarm = db.prepare(`
   INSERT INTO alarms (user_id, label, hour, minute, days_mask, repeats, interval)
   VALUES (@user_id, @label, @hour, @minute, @days_mask, @repeats, @interval)
@@ -35,6 +36,16 @@ const selectAlarmsByUser = db.prepare(`
 const deleteAlarm = db.prepare(`
   DELETE FROM alarms WHERE id = ? AND user_id = ?
 `);
+const selectDueAlarms = db.prepare(`
+    SELECT a.*, u.tg_chat_id
+    FROM alarms a
+    JOIN users u ON u.id = a.user_id
+    WHERE a.enabled = 1
+      AND a.hour = ?
+      AND a.minute = ?
+      AND (a.days_mask & ?) != 0
+`);
+
 
 function daysToMask(days) {
     return days.reduce((mask, d) => mask | (1 << (d-1)), 0);
@@ -59,6 +70,7 @@ async function checkAlert() {
 
     return isAlert
 }
+
 
 const alarmDrafts = new Map();
 
@@ -238,8 +250,6 @@ bot.on('callback_query', (query) => {
             }
         );
 
-        console.log('Saved alarm:', alarm);
-
         alarmDrafts.delete(query.from.id);
     }
 
@@ -283,32 +293,35 @@ bot.onText(/^\/alarms$/, (msg) => {
 });
 
 
-cron.schedule('*/5 * * * *', async () => {
+const pendingAlarms = new Map();
+cron.schedule('*/1 * * * *', async () => {
     const now = DateTime.now().setZone('Europe/Kyiv');
     const h = now.hour;
     const m = now.minute;
     const dowBit = 1 << (now.weekday - 1);
 
-    const due = db.prepare(`
-    SELECT a.*, u.tg_chat_id
-    FROM alarms a
-    JOIN users u ON u.id = a.user_id
-    WHERE a.enabled = 1
-      AND a.hour = ?
-      AND a.minute = ?
-      AND (a.days_mask & ?) != 0
-  `).all(h, m, dowBit);
+    const dueAlarms = selectDueAlarms.all(h, m, dowBit);
+    for (const alarm of dueAlarms) {
+        const key = `${alarm.id}_${alarm.tg_chat_id}`;
+        if (pendingAlarms.has(key)) continue;
 
-    if (due) {
-        const isAlert = await checkAlert()
-        if (!isAlert) {
-            for (const alarm of due) {
-                for (let i = 0; i < alarm.repeats; i++) {
-                    setTimeout(() => {
-                        bot.sendMessage(alarm.tg_chat_id, `⏰ #${i + 1} ${alarm.label}`);
-                    }, i * alarm.interval * 1000);
-                }
+        const waitAndFire = async () => {
+            let isAlertActive = await checkAlert();
+
+            while (isAlertActive) {
+                await new Promise(res => setTimeout(res, 60 * 1000));
+                isAlertActive = await checkAlert();
             }
-        }
+
+            for (let i = 0; i < alarm.repeats; i++) {
+                setTimeout(() => {
+                    bot.sendMessage(alarm.tg_chat_id, `⏰ #${i + 1} ${alarm.label}`);
+                }, i * alarm.interval * 1000);
+            }
+
+            pendingAlarms.delete(key);
+        };
+
+        pendingAlarms.set(key, waitAndFire());
     }
 });
