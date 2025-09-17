@@ -292,6 +292,14 @@ bot.onText(/^\/alarms$/, (msg) => {
     });
 });
 
+bot.onText(/^\/check$/, async (msg) => {
+    const isAlertActive = await checkAlert();
+
+    const text = isAlertActive ? '🔴 Тревога активна' : '🟢 Тревога не активна';
+
+    await bot.sendMessage(msg.chat.id, text)
+})
+
 
 const pendingAlarms = new Map();
 cron.schedule('*/1 * * * *', async () => {
